@@ -1,0 +1,167 @@
+#!/usr/bin/python
+from socket import socket, AF_INET, SOCK_STREAM
+from HTMLParser import HTMLParser
+import re
+import sys
+
+request = "GET / HTTP/1.1\nHost: cs5700sp17.ccs.neu.edu\n\n"
+s = socket(AF_INET, SOCK_STREAM) 						#Building TCP socket Connection
+host = "cs5700sp17.ccs.neu.edu"
+port = 80
+s.connect((host, port))
+s.send(request)									#Requesting for fakebook home page
+result  = s.recv(10000)
+crawled = ["/fakebook/", "/fakebook"]						#List of Crawled links
+waiting = []									#List of Waiting(To_Be_Crawled) links
+secret = []									#List of Flags
+ses= []
+if len(sys.argv) != 3:							#Checking if correct number of arguments passed
+        print "Incorrect Arguments Passed\n Please Use: ./webcrawler <username> <password]>"
+        s.close()
+	exit()
+class FlagParser(HTMLParser):							#Class to find Flags using HTML Parser
+    flg = 0
+    def handle_starttag(self, tag, attrs):
+	if tag == 'h2':
+            for name, value in attrs:
+                if name == 'class' and  value == 'secret_flag':
+                    self.flg = 1
+    def handle_data(self,data):
+	global secret
+	if self.flg == 1:
+		flag = data[6:]	
+		if flag not in secret:						#To check if flags are repeating
+			secret.append(flag)
+		self.flg = 0
+
+class LinkSearch(HTMLParser):							#Class to parse "a" tags(links) using HTML Parser
+    def handle_starttag(self, tag, attrs):
+        if tag == 'a':
+	   LinkSearch.attr = dict(attrs)
+           crawled.append(LinkSearch.attr)
+           linklist  = list(attrs)
+	   for name, value in attrs:
+                if name == 'href':
+                    if re.search('/fakebook/', value) == None:
+                        return
+                    LinkSearch.attr = dict(attrs)
+                    path = re.search('/fakebook/.*', value)			#For getting the links 
+                    path = path.group()
+                    if path in crawled:						#Do nothing if the page is already crawled
+                        return
+                    else:
+                        waiting.append(path)					#Add to the Waiting list
+
+	else:
+		return
+
+
+parser = LinkSearch()								#Instance of LinkSearch Class
+parser.feed(result)								#Parsing for links
+s.send("GET /accounts/login/?next=/fakebook / HTTP/1.1\n Host: cs5700sp17.ccs.neu.edu\n\n")         #To Get Login Page
+rest = s.recv(4096)
+
+def get_id(res):
+	global ses
+	si =  re.findall(r'sessionid=(\w+)', res, re.I)				#Finding Session Id
+	if si == None:
+        	return ses
+	ses = si
+	return si
+
+csr = re.findall(r'csrftoken=(\w+)',rest,re.I)
+
+if len(csr) <= 0:
+    rest = s.recv(4096)
+    csr = re.findall(r'csrftoken=(\w+)',rest,re.I)
+pag = get_id(rest)
+
+post = "POST /accounts/login/ HTTP/1.1\r\n" + "Host: cs5700sp17.ccs.neu.edu\r\n"	#POST details
+con  = "Connection: keep-alive\r\n"
+contLen = "Content-Length: 109\r\n"
+cache =  "Cache-Control: max-age=0\r\n"
+accept = "Accept: text/html ,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n"
+origin = "Origin: http://cs5700sp17.ccs.neu.edu\r\n"
+cookie = "Cookie:csrftoken=" + csr[0] + "; sessionid=" + pag[0] + "\r\n\r\n"
+user = "username=" + sys.argv[1] +"&password=" + sys.argv[2] + "&csrfmiddlewaretoken=" + csr[0] + "&next=%2Ffakebook%2F"
+
+message = post + con + contLen + cache + accept + origin + cookie +user
+m = socket()									#Creating persistent socket connection
+m.connect((host,port))
+m.send(message)
+q= m.recv(40960)
+
+try:
+    ses =  re.findall(r'sessionid=(\w+)', q, re.I)					#Finding new Session ID
+    t2 = m.send("GET /fakebook/ / HTTP/1.1\r\n Host: cs5700sp17.ccs.neu.edu\r\nConnection: keep-alive\r\nCookie: sessionid=" + ses[0] + "\r\n\r\n")
+except:
+    print "Error Raised: Cannot retrieve token"
+
+l = m.recv(40960)
+
+def get(path):                                                                  #Http GET method to retrieve other pages
+    try:
+	msg = "GET %s HTTP/1.1\r\nHost: %s\r\nCookie: csrftoken=%s; sessionid=%s\r\nConnection:keep-alive\r\n\r\n" % (path, "cs5700sp17.ccs.neu.edu", csr[0] ,ses[0])
+    	o=socket()
+    	o.connect((host,port))
+    	o.send(msg)
+    	response = o.recv(40960)
+    	return response
+    except:
+	print "Error Raised: Cannot retrieve token"
+
+def code_check(mg):								#For checking various HTTP code
+    global ses
+    if "200 OK" in mg:
+	return (200, mg)
+    elif "301 MOVED" in mg:
+        ses = get_id(mg)
+	pt = get(mg)
+	return (301,mg)
+    elif "302 FOUND" in mg:
+	ses = get_id(mg)
+        pt = get(mg)
+        return (302,mg)
+    elif "403 FORBIDDEN" in mg:
+        return (403, mg)
+    elif "404 NOT" in mg:
+        return (404, mg)
+    elif "500 INTERNAL" in mg:
+	return (500, mg)
+    else:
+        return (200,mg)
+
+rev = code_check(l)
+linkParser = LinkSearch()                                                       #Instance of LinkSearch class
+flagParser = FlagParser()                                                       #Instance of FlagParser class
+linkParser.feed(l)
+
+for lin in waiting:								#For Parsing links in waiting list 
+	set = get(lin)
+	cod = code_check(set)
+	if len(secret)==5:                                                      #Checking for 5 flags
+                for x in secret:
+                        print x                                                 #Printing all 5 flags
+		exit()                                                          #Terminating program
+	if cod[0] == 200:
+		linkParser.feed(set)
+		flagParser.feed(set)
+		if lin in waiting:
+			waiting.remove(lin)						#Remove from waiting list if crawled
+		crawled.append(lin)							#Add to Crawled list
+		continue 
+	elif cod[0]==500:								#Handling different error codes
+		continue
+	elif cod[0]==301:
+		waiting.remove(lin)
+		continue
+	elif cod[0]==302:
+                waiting.remove(lin)
+                continue
+	elif cod[0]==403:
+                waiting.remove(lin)
+                continue
+	elif cod[0]==404:
+                waiting.remove(lin)
+                continue
+
